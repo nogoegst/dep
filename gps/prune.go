@@ -5,6 +5,7 @@
 package gps
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
@@ -20,6 +21,8 @@ type PruneOptions uint8
 const (
 	// PruneNestedVendorDirs indicates if nested vendor directories should be pruned.
 	PruneNestedVendorDirs PruneOptions = 1 << iota
+	// PruneVendorToolsFiles indicates if vendor tools files should be pruned.
+	PruneVendorToolsFiles
 	// PruneUnusedPackages indicates if unused Go packages should be pruned.
 	PruneUnusedPackages
 	// PruneNonGoFiles indicates if non-Go files should be pruned.
@@ -41,10 +44,11 @@ const (
 // a cascading tree of pruning values, as expressed in CascadingPruneOptions; a
 // simple boolean cannot delineate between "false" and "none".
 type PruneOptionSet struct {
-	NestedVendor   uint8
-	UnusedPackages uint8
-	NonGoFiles     uint8
-	GoTests        uint8
+	NestedVendor     uint8
+	VendorToolsFiles uint8
+	UnusedPackages   uint8
+	NonGoFiles       uint8
+	GoTests          uint8
 }
 
 // CascadingPruneOptions is a set of rules for pruning a dependency tree.
@@ -77,6 +81,14 @@ func (o CascadingPruneOptions) PruneOptionsFor(pr ProjectRoot) PruneOptions {
 		}
 	}
 
+	if po.VendorToolsFiles != 0 {
+		if po.VendorToolsFiles == 1 {
+			ops |= PruneVendorToolsFiles
+		} else {
+			ops &^= PruneVendorToolsFiles
+		}
+	}
+
 	if po.UnusedPackages != 0 {
 		if po.UnusedPackages == 1 {
 			ops |= PruneUnusedPackages
@@ -106,7 +118,7 @@ func (o CascadingPruneOptions) PruneOptionsFor(pr ProjectRoot) PruneOptions {
 
 func defaultCascadingPruneOptions() CascadingPruneOptions {
 	return CascadingPruneOptions{
-		DefaultOptions:    PruneNestedVendorDirs,
+		DefaultOptions:    PruneNestedVendorDirs | PruneVendorToolsFiles,
 		PerProjectOptions: map[ProjectRoot]PruneOptionSet{},
 	}
 }
@@ -150,6 +162,13 @@ func PruneProject(baseDir string, lp LockedProject, options PruneOptions) error 
 		}
 	}
 
+	//	if (options & PruneVendorToolsFiles) != 0 {
+	fmt.Printf("prunining vendor tools files\n")
+	if err := pruneVendorToolsFiles(fsState); err != nil {
+		return errors.Wrapf(err, "failed to prune vendor tools files")
+	}
+	//	}
+
 	if (options & PruneUnusedPackages) != 0 {
 		if _, err := pruneUnusedPackages(lp, fsState); err != nil {
 			return errors.Wrap(err, "failed to prune unused packages")
@@ -192,6 +211,55 @@ func pruneVendorDirs(fsState filesystemState) error {
 			if err != nil && !os.IsNotExist(err) {
 				return err
 			}
+		}
+	}
+
+	return nil
+}
+
+func pruneVendorToolsFiles(fsState filesystemState) error {
+	vendorToolsDirs := []string{
+		"Godeps", // godep
+	}
+	vendorToolsFiles := []string{
+		"vendor.conf", // vndr
+		"vendor.yml",  // govend
+		"glide.yaml",  // glide
+		"glide.lock",  // glide
+		"Gopkg.toml",  // dep
+		"Gopkg.lock",  // dep
+		"GLOCKFILE",   // glock
+		"vendor.json", // govendor
+	}
+	toDelete := []string{}
+
+	for _, dir := range fsState.dirs {
+		for _, path := range vendorToolsDirs {
+			if filepath.Base(dir) == path {
+				toDelete = append(toDelete, filepath.Join(fsState.root, dir))
+			}
+		}
+	}
+
+	for _, link := range fsState.links {
+		for _, path := range vendorToolsDirs {
+			if filepath.Base(link.path) == path {
+				toDelete = append(toDelete, filepath.Join(fsState.root, link.path))
+			}
+		}
+	}
+
+	for _, file := range fsState.files {
+		for _, path := range vendorToolsFiles {
+			if filepath.Base(file) == path {
+				toDelete = append(toDelete, filepath.Join(fsState.root, file))
+			}
+		}
+	}
+
+	for _, path := range toDelete {
+		if err := os.RemoveAll(path); err != nil && !os.IsNotExist(err) {
+			return err
 		}
 	}
 
